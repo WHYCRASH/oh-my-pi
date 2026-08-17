@@ -226,6 +226,24 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "plan-lite",
+		description: "Toggle plan-lite mode (interpretation-first + scaled confirmation before edits)",
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			if (!runtime.ctx.settings.get("plan-lite.enabled" as SettingPath)) return "Plan-lite: disabled in settings";
+			if (runtime.ctx.planLiteEnabled) return "Plan-lite: on";
+			if (runtime.ctx.planModeEnabled) return "Plan-lite: blocked by plan mode";
+			if (runtime.ctx.goalModeEnabled) return "Plan-lite: blocked by goal mode";
+			return "Plan-lite: off";
+		},
+		handleTui: async (command, runtime) => {
+			await runWithDetachedModeDraft(command, runtime, () =>
+				runtime.ctx.handlePlanLiteCommand(command.args || undefined, runtime.input),
+			);
+		},
+	},
+	{
 		name: "vibe",
 		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
 		inlineHint: "[prompt]",

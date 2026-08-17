@@ -157,13 +157,14 @@ import { computeNonMessageTokens } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
 import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { listPlanFiles, readPlanFile } from "../plan-mode/plan-files";
-import type { PlanModeState } from "../plan-mode/state";
+import type { PlanLiteModeState, PlanModeState } from "../plan-mode/state";
 import goalModeContextPrompt from "../prompts/goals/goal-mode-context.md" with { type: "text" };
 import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
+import planLiteActivePrompt from "../prompts/system/plan-lite-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
 	type: "text",
@@ -501,6 +502,7 @@ export class AgentSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
+	#planLiteModeState: PlanLiteModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
 	#vibeModeState: VibeModeState | undefined;
@@ -4862,6 +4864,14 @@ export class AgentSession {
 		}
 	}
 
+	getPlanLiteModeState(): PlanLiteModeState | undefined {
+		return this.#planLiteModeState;
+	}
+
+	setPlanLiteModeState(state: PlanLiteModeState | undefined): void {
+		this.#planLiteModeState = state;
+	}
+
 	getGoalModeState(): GoalModeState | undefined {
 		return this.#goalModeState;
 	}
@@ -4991,6 +5001,23 @@ export class AgentSession {
 	 */
 	async sendPlanModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
 		const message = await this.#buildPlanModeMessage();
+		if (!message) return;
+		await this.sendCustomMessage(
+			{
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				details: message.details,
+			},
+			options ? { deliverAs: options.deliverAs } : undefined,
+		);
+	}
+
+	/**
+	 * Inject the plan-lite mode context message into the conversation history.
+	 */
+	async sendPlanLiteContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
+		const message = await this.#buildPlanLiteMessage();
 		if (!message) return;
 		await this.sendCustomMessage(
 			{
@@ -5156,6 +5183,18 @@ export class AgentSession {
 			role: "custom",
 			customType: "plan-mode-context",
 			content,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
+	async #buildPlanLiteMessage(): Promise<CustomMessage | null> {
+		if (!this.#planLiteModeState?.enabled) return null;
+		return {
+			role: "custom",
+			customType: "plan-lite-context",
+			content: prompt.render(planLiteActivePrompt, { askToolName: "ask" }),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -5575,6 +5614,10 @@ export class AgentSession {
 			const planModeMessage = await this.#buildPlanModeMessage();
 			if (planModeMessage) {
 				messages.push(planModeMessage);
+			}
+			const planLiteMessage = await this.#buildPlanLiteMessage();
+			if (planLiteMessage) {
+				messages.push(planLiteMessage);
 			}
 			const goalModeMessage = this.#buildGoalModeMessage();
 			if (goalModeMessage) {

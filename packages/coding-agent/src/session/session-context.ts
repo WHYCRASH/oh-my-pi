@@ -308,8 +308,10 @@ export function buildSessionContext(
 		} else if (entry.type === "model_change") {
 			pendingReset = true;
 		} else if (entry.type === "mode_change") {
-			const isPlanTransition = (entry.mode === "plan") !== (currentMode === "plan");
-			if (isPlanTransition) {
+			const isModeTransition =
+				(entry.mode === "plan" || entry.mode === "plan-lite") !==
+				(currentMode === "plan" || currentMode === "plan-lite");
+			if (isModeTransition) {
 				pendingReset = true;
 			}
 			currentMode = entry.mode;

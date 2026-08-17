@@ -63,6 +63,9 @@ export interface SegmentContext {
 		enabled: boolean;
 		paused: boolean;
 	} | null;
+	planLiteMode: {
+		enabled: boolean;
+	} | null;
 	prewalk: {
 		enabled: boolean;
 	} | null;

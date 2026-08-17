@@ -167,6 +167,7 @@ export interface InteractiveModeContext {
 	hideToolActivity: boolean;
 	todoExpanded: boolean;
 	planModeEnabled: boolean;
+	planLiteEnabled: boolean;
 	vibeModeEnabled: boolean;
 	goalModeEnabled: boolean;
 	goalModePaused: boolean;
@@ -445,6 +446,10 @@ export interface InteractiveModeContext {
 	setToolsExpanded(expanded: boolean): void;
 	toggleThinkingBlockVisibility(): void;
 	handlePlanModeCommand(
+		initialPrompt?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+	): Promise<boolean>;
+	handlePlanLiteCommand(
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean>;

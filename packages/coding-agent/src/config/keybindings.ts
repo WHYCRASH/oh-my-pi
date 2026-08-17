@@ -52,6 +52,7 @@ interface AppKeybindings {
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.plan.toggle": true;
+	"app.planLite.toggle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
 	"app.live.toggle": true;
@@ -221,6 +222,10 @@ export const KEYBINDINGS = {
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
 		description: "Toggle plan mode",
+	},
+	"app.planLite.toggle": {
+		defaultKeys: "alt+shift+g",
+		description: "Toggle plan-lite mode",
 	},
 	"app.history.search": {
 		defaultKeys: "ctrl+r",

@@ -480,6 +480,7 @@ export class Theme {
 		return {
 			model: this.#symbols["icon.model"],
 			plan: this.#symbols["icon.plan"],
+			planLite: this.#symbols["icon.planLite"],
 			prewalk: this.#symbols["icon.prewalk"],
 			goal: this.#symbols["icon.goal"],
 			pause: this.#symbols["icon.pause"],

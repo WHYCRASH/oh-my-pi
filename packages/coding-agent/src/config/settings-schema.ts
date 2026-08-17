@@ -4404,6 +4404,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Plan-lite mode
+	"plan-lite.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Plan-Lite Mode",
+			description: "Enable plan-lite mode: interpretation-first replies with scaled confirmation before edits",
+		},
+	},
+
+	"plan-lite.defaultOnStartup": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Start in Plan-Lite Mode",
+			description: "Automatically enter plan-lite mode at the start of every new session",
+			condition: "planLiteEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,

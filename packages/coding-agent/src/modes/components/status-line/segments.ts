@@ -238,6 +238,12 @@ const modeSegment: StatusLineSegment = {
 			return { content: theme.fg(color, content), visible: true };
 		}
 
+		const lite = ctx.planLiteMode;
+		if (lite?.enabled) {
+			const content = withIcon(theme.icon.planLite, "Plan-lite");
+			return { content: theme.fg("accent", content), visible: true };
+		}
+
 		const prewalk = ctx.prewalk;
 		if (prewalk?.enabled) {
 			const content = withIcon(theme.icon.prewalk, "Prewalk");

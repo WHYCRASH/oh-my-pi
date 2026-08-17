@@ -144,6 +144,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	planLiteEnabled: () => {
+		try {
+			return Settings.instance.get("plan-lite.enabled");
+		} catch {
+			return false;
+		}
+	},
 };
 
 // ═══════════════════════════════════════════════════════════════════════════

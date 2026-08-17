@@ -68,6 +68,7 @@ export type SymbolKey =
 	// Icons
 	| "icon.model"
 	| "icon.plan"
+	| "icon.planLite"
 	| "icon.prewalk"
 	| "icon.goal"
 	| "icon.pause"
@@ -278,6 +279,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "⬢",
 	"icon.plan": "🗺",
+	"icon.planLite": "🧭",
 	"icon.prewalk": "🏃",
 	"icon.goal": "🎯",
 	"icon.pause": "⏸",
@@ -540,6 +542,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.model": "\uec19",
 	// pick:  | alt:  
 	"icon.plan": "\uf2d2",
+	"icon.planLite": "\uf0eb",
 	"icon.prewalk": "\uf29d",
 	// pick:  (nf-fa-bullseye) | alt:  (nf-md-target) ◎ ⌖
 	"icon.goal": "\uf140",
@@ -798,6 +801,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "[M]",
 	"icon.plan": "plan",
+	"icon.planLite": "lite",
 	"icon.prewalk": "prewalk",
 	"icon.goal": "goal",
 	"icon.pause": "||",

@@ -374,6 +374,20 @@ export function shouldEnterPlanModeOnStartup(
 	);
 }
 
+export function shouldEnterPlanLiteModeOnStartup(
+	sessionManager: Pick<SessionManager, "buildSessionContext" | "getEntries">,
+	sessionSettings: Pick<Settings, "get">,
+): boolean {
+	const hasConversationContext = sessionManager.buildSessionContext().messages.length > 0;
+	const hasExplicitMode = sessionManager.getEntries().some(entry => entry.type === "mode_change");
+	return (
+		!hasConversationContext &&
+		!hasExplicitMode &&
+		sessionSettings.get("plan-lite.defaultOnStartup") &&
+		sessionSettings.get("plan-lite.enabled")
+	);
+}
+
 /** Options for creating an InteractiveMode instance (for future API use) */
 export interface InteractiveModeOptions {
 	/** Providers that were migrated during startup */
@@ -534,6 +548,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hideToolActivity = false;
 	todoExpanded = false;
 	planModeEnabled = false;
+	planLiteEnabled = false;
 	planModePaused = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
@@ -1170,6 +1185,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		// does not check plan.enabled itself.
 		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
+		}
+		// Same brand-new-session gate for plan-lite; #enterPlanLiteMode is
+		// idempotent and self-guards against an already-active mode.
+		if (shouldEnterPlanLiteModeOnStartup(this.sessionManager, this.session.settings)) {
+			await this.#enterPlanLiteMode();
 		}
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
@@ -2331,6 +2351,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	#updatePlanLiteStatus(): void {
+		this.statusLine.setPlanLiteModeStatus(this.planLiteEnabled ? { enabled: true } : undefined);
+		this.ui.requestRender();
+	}
+
 	#updateVibeModeStatus(): void {
 		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
 		this.ui.requestRender();
@@ -2566,6 +2591,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		}
 
+		if (this.planLiteEnabled) {
+			this.session.setPlanLiteModeState(undefined);
+			this.planLiteEnabled = false;
+			this.#updatePlanLiteStatus();
+		}
+
 		if (this.goalModeEnabled || this.goalModePaused) {
 			if (this.#goalModePreviousTools !== undefined) {
 				await this.session.setActiveToolsByName(this.#goalModePreviousTools);
@@ -2667,6 +2698,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			return;
 		}
+		if (!this.session.settings.get("plan-lite.enabled")) {
+			// Clear stale plan-lite mode so re-enabling the setting later
+			// doesn't unexpectedly restore an old plan-lite session.
+			if (sessionContext.mode === "plan-lite") {
+				this.sessionManager.appendModeChange("none");
+			}
+		} else if (sessionContext.mode === "plan-lite") {
+			await this.#enterPlanLiteMode({ persistModeChange: false });
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -2750,6 +2791,37 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#updatePlanModeStatus();
 		this.sessionManager.appendModeChange("plan", { planFilePath });
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+	}
+
+	async #enterPlanLiteMode(options?: { persistModeChange?: boolean }): Promise<void> {
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		if (this.planLiteEnabled) {
+			return;
+		}
+		// Suppress cache-miss marker on the next turn: plan-lite mode changes the
+		// system prompt, which predictably invalidates the cache.
+		this.session.setPlanLiteModeState({ enabled: true });
+		this.planLiteEnabled = true;
+		this.lastAssistantUsage = undefined;
+		this.#updatePlanLiteStatus();
+		if (options?.persistModeChange !== false) {
+			this.sessionManager.appendModeChange("plan-lite");
+		}
+		this.showStatus("Plan-lite mode enabled.");
+		if (this.session.isStreaming) {
+			await this.session.sendPlanLiteContext({ deliverAs: "steer" });
+		}
 	}
 
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
@@ -2856,6 +2928,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
 		if (!options?.silent) {
 			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
+		}
+	}
+
+	async #exitPlanLiteMode(options?: { silent?: boolean }): Promise<void> {
+		if (!this.planLiteEnabled) {
+			return;
+		}
+		// Suppress cache-miss marker on the next turn: plan-lite exit changes the
+		// system prompt, which predictably invalidates the cache.
+		this.session.setPlanLiteModeState(undefined);
+		this.planLiteEnabled = false;
+		this.lastAssistantUsage = undefined;
+		this.#updatePlanLiteStatus();
+		this.sessionManager.appendModeChange("none");
+		if (!options?.silent) {
+			this.showStatus("Plan-lite mode disabled.");
 		}
 	}
 
@@ -3370,11 +3458,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.clearPlanInternalAbortPending();
 		}
 	}
-
 	async handlePlanModeCommand(
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		if (this.planLiteEnabled) {
+			this.showWarning("Exit plan-lite mode first.");
+			return false;
+		}
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
 			return false;
@@ -3437,6 +3528,55 @@ export class InteractiveMode implements InteractiveModeContext {
 		return false;
 	}
 
+	async handlePlanLiteCommand(
+		initialPrompt?: string,
+		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
+	): Promise<boolean> {
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return false;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return false;
+		}
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return false;
+		}
+		if (this.planLiteEnabled) {
+			await this.#exitPlanLiteMode();
+			return false;
+		}
+		if (!this.session.settings.get("plan-lite.enabled")) {
+			this.showWarning("Plan-lite mode is disabled. Enable it in settings (plan-lite.enabled).");
+			return false;
+		}
+		await this.#enterPlanLiteMode();
+		if (!initialPrompt) return false;
+		if (isKnownSkillCommand(this, initialPrompt)) {
+			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
+				images: input?.images,
+				propagateErrors: true,
+			});
+			return true;
+		}
+		if (this.session.isStreaming) {
+			const images = input?.images?.length ? input.images : undefined;
+			await this.withLocalSubmission(
+				initialPrompt,
+				() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
+				{ imageCount: images?.length ?? 0 },
+			);
+			return true;
+		}
+		if (this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt, ...input }, { preserveDraft: true }));
+			return true;
+		}
+		return false;
+	}
+
 	/**
 	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
 	 * active toolset down to `read`, optional parent-owned `todo`, plus those
@@ -3450,6 +3590,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		if (this.vibeModeEnabled) {
 			await this.#exitVibeMode();
+			return false;
+		}
+		if (this.planLiteEnabled) {
+			this.showWarning("Exit plan-lite mode first.");
 			return false;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
@@ -3585,6 +3729,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		rest?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		if (this.planLiteEnabled) {
+			this.showWarning("Exit plan-lite mode first.");
+			return false;
+		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.showWarning("Exit plan mode first.");
 			return false;
