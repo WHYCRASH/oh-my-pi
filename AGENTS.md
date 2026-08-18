@@ -296,3 +296,17 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+# Fork Changes / Additions
+
+## go-usage — OpenCode Go usage in the OMP TUI
+
+Single-file auto-discovered extension at `./.omp/agent/extensions/go-usage.ts` — `/go-usage [--model=<id>] [--refresh]` shows live `5h/wk/mo` usage, model table and kitty gauges, with animation and a persistent mini-bar for `opencode-go` models.
+
+Full docs: `./.omp/agent/extensions/go-usage.md`.
+
+## bash-interceptor auto-redirect — transparent bash→tool translation
+
+Auto-redirects simple intercepted `bash` calls (`cat`/`less`/`more`→`read`, `head -n`→`read:1-N`, `rg`/`grep`→`grep`, `find -name`→`glob`) via `src/tools/bash-redirect.ts` + `src/tools/bash.ts` dispatch, saving the wasted blocker round-trip. Strengthens `prompts/tools/bash.md`, enabled via `bashInterceptor.enabled: true`.
+
+Full docs: `./.omp/agent/extensions/bash-interceptor-auto-redirect.md`.

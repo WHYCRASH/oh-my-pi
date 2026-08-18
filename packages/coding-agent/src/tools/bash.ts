@@ -30,6 +30,7 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
+import { translateBashToTool } from "./bash-redirect";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
@@ -985,6 +986,24 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			for (const commandToCheck of commandsToCheck) {
 				const interception = checkBashInterception(commandToCheck, ctx?.toolNames ?? [], rules, rawCommand);
 				if (interception.block) {
+					const redirect = translateBashToTool(commandToCheck);
+					if (redirect) {
+						const targetTool = this.session.getToolByName?.(redirect.tool);
+						if (targetTool) {
+							const redirectInput = { ...redirect.input, i: `auto-redirect from bash: ${commandToCheck.trim()}` } as Parameters<
+								(typeof targetTool)["execute"]
+							>[1];
+							const result = await targetTool.execute(_toolCallId, redirectInput, signal, undefined, ctx);
+							const notice = `[bash "${commandToCheck.trim()}" auto-redirected to \`${redirect.tool}\` — call \`${redirect.tool}\` directly next time]\n`;
+							const first = result.content[0];
+							if (first && first.type === "text") {
+								result.content = [{ type: "text", text: notice + first.text }, ...result.content.slice(1)];
+							} else {
+								result.content = [{ type: "text", text: notice }, ...result.content];
+							}
+							return result;
+						}
+					}
 					throw new ToolError(interception.message ?? "Command blocked");
 				}
 			}

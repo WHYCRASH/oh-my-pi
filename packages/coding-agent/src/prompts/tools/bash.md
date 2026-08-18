@@ -14,8 +14,9 @@ Use ONLY for one binary or a short pipeline that computes a fact (`wc -l`, `sort
 
 <critical>
 {{#if hasGrep}}- NEVER use shell `grep`/`rg`; use built-in `grep`.{{/if}}
+{{#if hasRead}}- `cat`/`head <N>` a file → `read` (use `path:1-N` selector); NEVER shell cat/head/tail.{{/if}}
 {{#if hasRead}}{{#if hasGlob}}- List directories with `read` and find paths with `glob`; NEVER use `ls`/`find`.{{/if}}{{/if}}
-- Avoid `head`, `tail`, and redirection: output is captured, truncated, and linked as `artifact://<id>`.
+- Avoid `tail` and redirection: output is captured, truncated, and linked as `artifact://<id>`.
 {{#if hasLaunch}}- Services, watchers, debuggers, and REPLs MUST use `hub` (`op:"start"`).{{/if}}
 </critical>
 
