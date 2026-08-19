@@ -393,6 +393,9 @@ export interface EditorTopBorder {
 	width: number;
 	/** Optional logical revision that changes independently of available width. */
 	revision?: number;
+	/** Stacked lines rendered above the border line, each right-aligned to the
+	 *  full editor width. Content is already styled; left padding is added here. */
+	above?: readonly string[];
 }
 
 interface HistoryEntry {
@@ -931,7 +934,9 @@ export class Editor implements Component, Focusable {
 			if (this.#topBorderProvider) {
 				const previousWidth = this.#topBorderProviderWidth;
 				topBorder = this.#topBorderProvider(topFillWidth);
-				const signature = topBorder ? `${topBorder.width}\0${topBorder.content}` : "";
+				const signature = topBorder
+					? `${topBorder.width}\0${(topBorder.above ?? []).join("\0")}\0${topBorder.content}`
+					: "";
 				const revision = topBorder?.revision;
 				if (
 					(previousWidth !== undefined &&
@@ -949,7 +954,13 @@ export class Editor implements Component, Focusable {
 				topBorder = this.#topBorderContent;
 			}
 			if (topBorder) {
-				const { content, width: statusWidth } = topBorder;
+				const { content, width: statusWidth, above } = topBorder;
+				if (above && above.length > 0) {
+					for (const line of above) {
+						const lineWidth = visibleWidth(line);
+						result.push(lineWidth <= width ? padding(width - lineWidth) + line : truncateToWidth(line, width));
+					}
+				}
 				if (statusWidth <= topFillWidth) {
 					// Status fits - add fill after it
 					const fillWidth = topFillWidth - statusWidth;

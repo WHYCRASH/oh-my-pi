@@ -4,12 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { translateBashToTool } from "../src/tools/bash-redirect";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { translateBashToTool } from "../src/tools/bash-redirect";
 
 describe("translateBashToTool", () => {
 	// cat -> read
@@ -34,31 +34,55 @@ describe("translateBashToTool", () => {
 
 	// grep / rg -> grep
 	test("rg pattern src", () => {
-		expect(translateBashToTool("rg pattern src")).toEqual({ tool: "grep", input: { pattern: "pattern", path: "src" } });
+		expect(translateBashToTool("rg pattern src")).toEqual({
+			tool: "grep",
+			input: { pattern: "pattern", path: "src" },
+		});
 	});
 	test("rg pattern without path", () => {
 		expect(translateBashToTool("rg myPattern")).toEqual({ tool: "grep", input: { pattern: "myPattern" } });
 	});
 	test("rg -i pattern -> case:false", () => {
-		expect(translateBashToTool("rg -i pattern")).toEqual({ tool: "grep", input: { pattern: "pattern", case: false } });
+		expect(translateBashToTool("rg -i pattern")).toEqual({
+			tool: "grep",
+			input: { pattern: "pattern", case: false },
+		});
 	});
 	test("rg --ignore-case pattern", () => {
-		expect(translateBashToTool("rg --ignore-case pattern")).toEqual({ tool: "grep", input: { pattern: "pattern", case: false } });
+		expect(translateBashToTool("rg --ignore-case pattern")).toEqual({
+			tool: "grep",
+			input: { pattern: "pattern", case: false },
+		});
 	});
 	test("grep -F escapes regex", () => {
-		expect(translateBashToTool('grep -F "a.b" file')).toEqual({ tool: "grep", input: { pattern: "a\\.b", path: "file" } });
+		expect(translateBashToTool('grep -F "a.b" file')).toEqual({
+			tool: "grep",
+			input: { pattern: "a\\.b", path: "file" },
+		});
 	});
 	test("grep --fixed-strings", () => {
-		expect(translateBashToTool("grep --fixed-strings 'a*b' file")).toEqual({ tool: "grep", input: { pattern: "a\\*b", path: "file" } });
+		expect(translateBashToTool("grep --fixed-strings 'a*b' file")).toEqual({
+			tool: "grep",
+			input: { pattern: "a\\*b", path: "file" },
+		});
 	});
 	test("fgrep implies -F", () => {
-		expect(translateBashToTool("fgrep a.b file")).toEqual({ tool: "grep", input: { pattern: "a\\.b", path: "file" } });
+		expect(translateBashToTool("fgrep a.b file")).toEqual({
+			tool: "grep",
+			input: { pattern: "a\\.b", path: "file" },
+		});
 	});
 	test("combined -iF", () => {
-		expect(translateBashToTool("grep -iF pattern file")).toEqual({ tool: "grep", input: { pattern: "pattern", path: "file", case: false } });
+		expect(translateBashToTool("grep -iF pattern file")).toEqual({
+			tool: "grep",
+			input: { pattern: "pattern", path: "file", case: false },
+		});
 	});
 	test("grep -- pattern with dash", () => {
-		expect(translateBashToTool("grep -- -pattern file")).toEqual({ tool: "grep", input: { pattern: "-pattern", path: "file" } });
+		expect(translateBashToTool("grep -- -pattern file")).toEqual({
+			tool: "grep",
+			input: { pattern: "-pattern", path: "file" },
+		});
 	});
 
 	// find -> glob

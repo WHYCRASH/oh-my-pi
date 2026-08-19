@@ -15,7 +15,7 @@ export interface CollabStatus {
 }
 
 export interface StatusLineSegmentOptions {
-	model?: { showThinkingLevel?: boolean };
+	model?: { showThinkingLevel?: boolean; maxLength?: number };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
@@ -35,6 +35,11 @@ export interface StatusLineSettings {
 	/** Replace the model-segment icon with the thinking-level glyph and drop the
 	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
 	compactThinkingLevel?: boolean;
+	/** Render right-hand segments as right-aligned stacked lines above the
+	 *  status bar, instead of inline. Right-aligned meters hug the window's
+	 *  right edge with the title row staying at the bottom. Falls back to
+	 *  single-line on short terminals (<12 rows). */
+	stackRight?: boolean;
 }
 
 export type EffectiveStatusLineSettings = Required<

@@ -111,7 +111,17 @@ function hasMetacharsOutsideQuotes(command: string): boolean {
 			i++;
 			continue;
 		}
-		if (ch === "|" || ch === "&" || ch === ";" || ch === "(" || ch === ")" || ch === "<" || ch === ">" || ch === "`" || ch === "$") {
+		if (
+			ch === "|" ||
+			ch === "&" ||
+			ch === ";" ||
+			ch === "(" ||
+			ch === ")" ||
+			ch === "<" ||
+			ch === ">" ||
+			ch === "`" ||
+			ch === "$"
+		) {
 			return true;
 		}
 	}

@@ -103,7 +103,15 @@ const modelSegment: StatusLineSegment = {
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
-
+		// Strip provider privacy/training-suffix parentheticals (OpenRouter's
+		// " (Data Used for Training)" etc.) — any parenthetical containing
+		// "training" case-insensitive — and truncate to the configured max
+		// length (visible width, ANSI-safe). Default 32 keeps nerd-font bars compact.
+		modelName = modelName.replace(/\s*\([^)]*training[^)]*\)/gi, "").trim();
+		{
+			const maxLen = opts.maxLength ?? 32;
+			if (maxLen > 0) modelName = truncateToWidth(modelName, maxLen);
+		}
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.
 		let thinkingDisplay = "";

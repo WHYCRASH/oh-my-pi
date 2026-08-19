@@ -163,8 +163,8 @@ import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with {
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
-import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planLiteActivePrompt from "../prompts/system/plan-lite-active.md" with { type: "text" };
+import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
 	type: "text",

@@ -871,8 +871,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// (#4145). The TUI throttles renders at ~30fps, so a long-running eval
 		// spraying events no longer runs `getTopBorder` synchronously in the
 		// hot path where the render never gets to paint the result.
-		this.editor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
-
+		this.editor.setTopBorderProvider(availableWidth =>
+			this.statusLine.getTopBorder(availableWidth, this.ui.terminal.rows),
+		);
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
@@ -1835,6 +1836,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			stackRight: settings.get("statusLine.stackRight"),
 		});
 	}
 
@@ -4431,7 +4433,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		};
 		nextEditor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(nextEditor));
-		nextEditor.setTopBorderProvider(availableWidth => this.statusLine.getTopBorder(availableWidth));
+		nextEditor.setTopBorderProvider(availableWidth =>
+			this.statusLine.getTopBorder(availableWidth, this.ui.terminal.rows),
+		);
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);

@@ -30,8 +30,8 @@ import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
-import { translateBashToTool } from "./bash-redirect";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
+import { translateBashToTool } from "./bash-redirect";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
@@ -990,9 +990,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					if (redirect) {
 						const targetTool = this.session.getToolByName?.(redirect.tool);
 						if (targetTool) {
-							const redirectInput = { ...redirect.input, i: `auto-redirect from bash: ${commandToCheck.trim()}` } as Parameters<
-								(typeof targetTool)["execute"]
-							>[1];
+							const redirectInput = {
+								...redirect.input,
+								i: `auto-redirect from bash: ${commandToCheck.trim()}`,
+							} as Parameters<(typeof targetTool)["execute"]>[1];
 							const result = await targetTool.execute(_toolCallId, redirectInput, signal, undefined, ctx);
 							const notice = `[bash "${commandToCheck.trim()}" auto-redirected to \`${redirect.tool}\` — call \`${redirect.tool}\` directly next time]\n`;
 							const first = result.content[0];

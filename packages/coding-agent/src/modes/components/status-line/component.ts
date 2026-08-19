@@ -31,9 +31,10 @@ import type {
 	StatusLineSettings,
 } from "./types";
 
+const MIN_STACK_ROWS = 12;
+
 const JJ_REFRESH_TTL_MS = 5000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
-
 function normalizeCodexIdentityValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
 }
@@ -1686,7 +1687,7 @@ export class StatusLineComponent implements Component {
 		return theme.fg("statusLineSubagents", `${theme.icon.agents} ${this.#subagentCount} ${noun}`);
 	}
 
-	#buildStatusLine(width: number): string {
+	#buildTopBorder(width: number, stackRight: boolean): { content: string; above: readonly string[] } {
 		const effectiveSettings = this.#resolveSettings();
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
@@ -1770,16 +1771,19 @@ export class StatusLineComponent implements Component {
 		let leftWidth = groupWidth(left, leftCapWidth, leftSepWidth);
 		let rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
+		const lineWidth = (): number => (stackRight ? leftWidth : totalWidth());
 
 		if (topFillWidth > 0) {
-			while (totalWidth() > topFillWidth && right.length > 0) {
-				right.pop();
-				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+			if (!stackRight) {
+				while (totalWidth() > topFillWidth && right.length > 0) {
+					right.pop();
+					rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
+				}
 			}
 			// Shrink path before dropping left segments — path is the only elastic segment
 			const pathIdx = leftSegIds.indexOf("path");
-			if (pathIdx >= 0 && totalWidth() > topFillWidth) {
-				const overflow = totalWidth() - topFillWidth;
+			if (pathIdx >= 0 && lineWidth() > topFillWidth) {
+				const overflow = lineWidth() - topFillWidth;
 				const currentPathVW = visibleWidth(left[pathIdx]);
 				const minPathVW = 8; // icon + ellipsis + a few chars
 				const shrinkable = currentPathVW - minPathVW;
@@ -1820,7 +1824,7 @@ export class StatusLineComponent implements Component {
 				return left.length - 1;
 			};
 
-			while (totalWidth() > topFillWidth && left.length > 0) {
+			while (lineWidth() > topFillWidth && left.length > 0) {
 				const dropIdx = leftOverflowDropIndex();
 				left.splice(dropIdx, 1);
 				leftSegIds.splice(dropIdx, 1);
@@ -1851,11 +1855,27 @@ export class StatusLineComponent implements Component {
 		};
 
 		const leftGroup = renderGroup(left, "left");
+
+		// Stacked layout: title = left group + gap fill to full width; right segments
+		// become `above` lines the editor right-aligns against the window edge.
+		if (stackRight && right.length > 0) {
+			const sessionName =
+				effectiveSettings.sessionAccent !== false ? this.session.sessionManager?.getSessionName() : undefined;
+			const accentHex = sessionName
+				? getSessionAccentHex(sessionName, theme.getMajorThemeColorHexes(), theme.accentSurfaceLuminance)
+				: undefined;
+			const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
+			const gapWidth = Math.max(0, topFillWidth - leftWidth);
+			const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
+			const content = leftGroup ? leftGroup + gapFill : gapFill;
+			return { content, above: right };
+		}
+
 		const rightGroup = renderGroup(right, "right");
-		if (!leftGroup && !rightGroup) return "";
+		if (!leftGroup && !rightGroup) return { content: "", above: [] };
 
 		if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
-			return leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
+			return { content: leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup, above: [] };
 		}
 
 		const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
@@ -1866,20 +1886,31 @@ export class StatusLineComponent implements Component {
 			: undefined;
 		const gapColor = getSessionAccentAnsi(accentHex) ?? theme.getFgAnsi("border");
 		const gapFill = `${gapColor}${theme.boxRound.horizontal.repeat(gapWidth)}\x1b[39m`;
-		return leftGroup + gapFill + rightGroup;
+		return { content: leftGroup + gapFill + rightGroup, above: [] };
 	}
 
-	getTopBorder(width: number): { content: string; width: number; revision: number } {
-		let content = this.#buildStatusLine(width);
-		if (this.#focusedAgentId && content) {
+	getTopBorder(
+		width: number,
+		rows?: number,
+	): { content: string; width: number; revision: number; above?: readonly string[] } {
+		const wantsStack = this.#resolveSettings().stackRight === true;
+		const allowStack = wantsStack && (rows === undefined || rows >= MIN_STACK_ROWS);
+		const { content, above } = this.#buildTopBorder(width, allowStack);
+		let finalContent = content;
+		if (this.#focusedAgentId && finalContent) {
 			// Dim the whole bar while focus-proxied. Group/cap terminators emit full
 			// `\x1b[0m` resets that would cancel faint mid-bar, so re-open it after each.
-			content = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
+			finalContent = `\x1b[2m${content.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`;
 		}
+		const finalAbove =
+			this.#focusedAgentId && above.length > 0
+				? above.map(line => `\x1b[2m${line.replaceAll("\x1b[0m", "\x1b[0m\x1b[2m")}\x1b[22m`)
+				: above;
 		return {
-			content,
-			width: visibleWidth(content),
+			content: finalContent,
+			width: visibleWidth(finalContent),
 			revision: this.#widthEpochRevision,
+			above: allowStack && finalAbove.length > 0 ? finalAbove : undefined,
 		};
 	}
 

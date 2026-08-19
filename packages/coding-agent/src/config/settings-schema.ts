@@ -699,6 +699,17 @@ export const SETTINGS_SCHEMA = {
 				"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
 		},
 	},
+	"statusLine.stackRight": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "appearance",
+			group: "Status Line",
+			label: "Stack Right Segments",
+			description:
+				"Render the right-hand segments (meters, cost, tokens) as a right-aligned vertical stack above the status bar instead of inline. The title row stays at the bottom; falls back to inline on terminals shorter than 12 rows.",
+		},
+	},
 	"tools.artifactSpillThreshold": {
 		type: "number",
 		default: 50,

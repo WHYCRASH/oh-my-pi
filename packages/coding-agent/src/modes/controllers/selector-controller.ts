@@ -224,6 +224,7 @@ export class SelectorController {
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+							stackRight: settings.get("statusLine.stackRight"),
 							...previewSettings,
 						});
 						this.ctx.ui.requestRender();
@@ -231,7 +232,7 @@ export class SelectorController {
 					getStatusLinePreview: () => {
 						// Return the rendered status line for inline preview
 						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getTopBorder(availableWidth).content;
+						return this.ctx.statusLine.getTopBorder(availableWidth, this.ctx.ui.terminal.rows).content;
 					},
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
