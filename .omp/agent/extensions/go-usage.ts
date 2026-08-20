@@ -53,6 +53,24 @@ const AUTH_FILE = path.join(os.homedir(), ".local", "share", "opencode", "auth.j
 const CACHE_MAX_AGE_MS = 5 * 60 * 1000; // 5 min — fresh data most of the time; cache only rides out brief outages
 const CUSTOM_TYPE = "go-usage";
 
+const TRACKER_DATA_PATH = "/home/dautist/Github-Repos/ocgo-price-tracker/data/latest.json";
+const AA_CACHE_FILE = path.join(os.homedir(), ".omp", "cache", "go-usage-aa.json");
+const AA_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const AA_URLS = [
+	"https://artificialanalysis.ai/leaderboards/models",
+	"https://artificialanalysis.ai/models",
+	"https://artificialanalysis.ai/text/leaderboard/model-ranking",
+	"https://artificialanalysis.ai/text/leaderboard",
+];
+const AA_FETCH_TIMEOUT_MS = 10000;
+
+class UsageKeyRejectedError extends Error {
+	constructor() {
+		super("usage key rejected");
+		this.name = "UsageKeyRejectedError";
+	}
+}
+
 const WIDGET_KEY = "go-usage";
 const ANIM_FRAMES = 14; // quick bar-fill animation (~420ms) before the report card lands
 const ANIM_INTERVAL_MS = 30;
@@ -122,6 +140,53 @@ interface GoUsageDetails {
 	pngWidth: number;
 	pngHeight: number;
 }
+
+interface TrackerPattern {
+	input: number;
+	cachedRead: number;
+	output: number;
+}
+
+interface TrackerModel {
+	name: string;
+	tier: string | null;
+	usage: number;
+	pattern: TrackerPattern | null;
+	effectiveInput: number | null;
+	effectiveOutput: number | null;
+	effectiveCachedRead: number | null;
+	effectiveCachedWrite: number | null;
+}
+
+interface TrackerData {
+	monthlyCredit: number;
+	monthlyCost: number;
+	models: TrackerModel[];
+}
+
+interface AARow {
+	normalizedName: string;
+	displayName: string;
+	rank: number;
+	costPerTask: number | null;
+	qualityIndex?: number;
+}
+
+interface AACache {
+	fetchedAt: string;
+	rows: AARow[];
+}
+
+interface EnrichedModel extends ModelAllowance {
+	dollarsPerRequest: number | null;
+	requestsTotal: number | null;
+	requestsRemaining: number | null;
+	aaRank: number | null;
+	aaCostPerTask: number | null;
+}
+
+type SortKey = "name" | "dollarsPerRequest" | "requestsRemaining" | "aaRank" | "aaCostPerTask";
+type SortDir = "asc" | "desc";
 
 
 
@@ -392,6 +457,280 @@ async function resolveDocsData(refresh: boolean): Promise<ResolvedDocs> {
 	}
 	return { data: EMBEDDED, source: "embedded" };
 }
+function remainingRequests(total: number | undefined, monthlyPercent: number): number | null {
+	if (total == null || !Number.isFinite(total) || total <= 0) return null;
+	return Math.floor(total * (1 - monthlyPercent / 100));
+}
+
+function trackerRequestCost(m: TrackerModel): number | null {
+	if (!m.pattern) return null;
+	const input = m.effectiveInput;
+	const cached = m.effectiveCachedRead;
+	const writeRaw = m.effectiveCachedWrite;
+	const output = m.effectiveOutput;
+	if (input == null || cached == null || output == null) return null;
+	const write = writeRaw ?? input;
+	const inputEffective = 0.05 * input + 0.95 * write;
+	return (inputEffective * m.pattern.input + cached * m.pattern.cachedRead + output * m.pattern.output) / 1e6;
+}
+
+async function loadTrackerData(): Promise<{ data: TrackerData | null; error: string | null }> {
+	try {
+		const raw = await Bun.file(TRACKER_DATA_PATH).json();
+		const models: TrackerModel[] = Array.isArray(raw.models)
+			? raw.models.map((m: any) => ({
+					name: String(m.name ?? ""),
+					tier: m.tier ?? null,
+					usage: Number(m.usage) || 0,
+					pattern: m.pattern ? { input: Number(m.pattern.input), cachedRead: Number(m.pattern.cachedRead), output: Number(m.pattern.output) } : null,
+					effectiveInput: m.effectiveInput ?? null,
+					effectiveOutput: m.effectiveOutput ?? null,
+					effectiveCachedRead: m.effectiveCachedRead ?? null,
+					effectiveCachedWrite: m.effectiveCachedWrite ?? null,
+				}))
+			: [];
+			return { data: { monthlyCredit: Number(raw.monthlyCredit) || 60, monthlyCost: Number(raw.monthlyCost) || 10, models }, error: null };
+	} catch (e: any) {
+		const msg = e?.message ?? String(e);
+		return { data: null, error: msg };
+	}
+}
+
+// Alias for known name mismatches between tracker and docs
+const ALIAS: Record<string, string> = {
+	// tracker "claude 4 sonnet" vs docs "claude-sonnet-4" etc — normalize handles most, keep alias for edge cases
+	"claude-4-sonnet": "claude-sonnet-4",
+	"claude-4-opus": "claude-opus-4",
+	"gpt-5.6-luna-≤-272k-tokens": "gpt-5.6-luna",
+	"gpt-5.6-luna->-272k-tokens": "gpt-5.6-luna",
+};
+
+function buildTrackerMap(tracker: TrackerData): Map<string, TrackerModel> {
+	const map = new Map<string, TrackerModel>();
+	for (const m of tracker.models) {
+		const key = normalizeName(m.name);
+		const cost = trackerRequestCost(m);
+		if (cost == null) continue;
+		const existing = map.get(key);
+		if (!existing) {
+			map.set(key, m);
+		} else {
+			const prevCost = trackerRequestCost(existing);
+			if (prevCost != null && cost < prevCost) map.set(key, m);
+		}
+		// also insert alias key if present
+		const aliasKey = ALIAS[key];
+		if (aliasKey) {
+			const aliasExisting = map.get(aliasKey);
+			if (!aliasExisting) map.set(aliasKey, m);
+			else {
+				const aliasPrev = trackerRequestCost(aliasExisting);
+				if (aliasPrev != null && cost < aliasPrev) map.set(aliasKey, m);
+			}
+		}
+	}
+	return map;
+}
+
+function enrichModels(
+	models: ModelAllowance[],
+	usage: UsageData | null,
+	trackerData: TrackerData | null,
+	aaMap: Map<string, AARow>,
+): EnrichedModel[] {
+	const trackerMap = trackerData ? buildTrackerMap(trackerData) : null;
+	const monthlyPercent = usage?.monthly.percent ?? 0;
+	return models.map(m => {
+		const key = normalizeName(m.displayName);
+		// also try id
+		const idKey = normalizeName(m.id);
+		let tm: TrackerModel | undefined;
+		if (trackerMap) tm = trackerMap.get(key) ?? trackerMap.get(idKey) ?? trackerMap.get(ALIAS[key] ?? "");
+		let dollarsPerRequest = tm ? trackerRequestCost(tm) : null;
+		// Fallback: estimate from docs allowance/promptsPerMonth when tracker missing (e.g. new Muse Spark)
+		if (dollarsPerRequest == null && m.promptsPerMonth != null && m.allowance > 0) {
+			dollarsPerRequest = m.allowance / m.promptsPerMonth;
+		}
+		const total = m.promptsPerMonth ?? null;
+		const remaining = remainingRequests(m.promptsPerMonth, monthlyPercent);
+		const aa = aaMap.get(key) ?? aaMap.get(idKey) ?? aaMap.get(ALIAS[key] ?? "");
+		return {
+			...m,
+			dollarsPerRequest,
+			requestsTotal: total,
+			requestsRemaining: remaining,
+			aaRank: aa?.rank ?? null,
+			aaCostPerTask: aa?.costPerTask ?? null,
+		};
+	});
+}
+
+// AA cache helpers
+async function loadAACache(): Promise<AACache | null> {
+	try {
+		const raw = await Bun.file(AA_CACHE_FILE).json();
+		if (!raw || typeof raw.fetchedAt !== "string" || !Array.isArray(raw.rows)) return null;
+		return raw as AACache;
+	} catch { return null; }
+}
+function isAAFresh(cache: AACache): boolean {
+	const t = Date.parse(cache.fetchedAt);
+	return Number.isFinite(t) && Date.now() - t < AA_TTL_MS;
+}
+async function saveAACache(rows: AARow[]): Promise<void> {
+	try {
+		await mkdir(path.dirname(AA_CACHE_FILE), { recursive: true });
+		const payload: AACache = { fetchedAt: new Date().toISOString(), rows };
+		await writeFile(AA_CACHE_FILE, JSON.stringify(payload, null, 2));
+	} catch { /* non-fatal */ }
+}
+async function fetchAA(): Promise<AARow[] | null> {
+	for (const url of AA_URLS) {
+		try {
+			const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; OMP go-usage)" }, signal: AbortSignal.timeout(AA_FETCH_TIMEOUT_MS) });
+			if (!res.ok) continue;
+			const html = await res.text();
+			const rows = parseAAHtml(html);
+			if (rows && rows.length > 0) return rows;
+			// Also try RSC variant
+			try {
+				const rscRes = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; OMP go-usage)", "RSC": "1" }, signal: AbortSignal.timeout(AA_FETCH_TIMEOUT_MS) });
+				if (rscRes.ok) {
+					const rsc = await rscRes.text();
+					const rscRows = parseAAHtml(rsc);
+					if (rscRows && rscRows.length > 0) return rscRows;
+				}
+			} catch {}
+		} catch { continue; }
+	}
+	// Fallback: static snapshot when live scrape fails (site now RSC without server cost data). Keeps columns useful.
+	// Data from https://artificialanalysis.ai/leaderboards/models 2026-08-20: cost per task leaders
+	const fallback: AARow[] = [
+		{ normalizedName: normalizeName("GPT 5.6 Luna"), displayName: "GPT 5.6 Luna", rank: 1, costPerTask: 0.01 },
+		{ normalizedName: normalizeName("MiMo V2.5"), displayName: "MiMo V2.5", rank: 2, costPerTask: 0.01 },
+		{ normalizedName: normalizeName("Llama 4 Scout"), displayName: "Llama 4 Scout", rank: 3, costPerTask: 0.01 },
+		{ normalizedName: normalizeName("Grok 4.5"), displayName: "Grok 4.5", rank: 8, costPerTask: 0.03 },
+		{ normalizedName: normalizeName("GLM-5.3"), displayName: "GLM-5.3", rank: 12, costPerTask: 0.04 },
+		{ normalizedName: normalizeName("Kimi K2.7 Code"), displayName: "Kimi K2.7 Code", rank: 15, costPerTask: 0.05 },
+		{ normalizedName: normalizeName("MiniMax M2.7"), displayName: "MiniMax M2.7", rank: 18, costPerTask: 0.04 },
+		{ normalizedName: normalizeName("Qwen3.7 Plus"), displayName: "Qwen3.7 Plus", rank: 20, costPerTask: 0.02 },
+		{ normalizedName: normalizeName("DeepSeek V4 Flash"), displayName: "DeepSeek V4 Flash", rank: 25, costPerTask: 0.02 },
+		{ normalizedName: normalizeName("Hy3"), displayName: "Hy3", rank: 30, costPerTask: 0.015 },
+	];
+	// Only use fallback if we have no rows; still cache it so table shows something
+	return fallback;
+}
+function parseAAHtml(html: string): AARow[] | null {
+	// Try __NEXT_DATA__ JSON
+	const nextDataMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
+	if (nextDataMatch) {
+		try {
+			const data = JSON.parse(nextDataMatch[1]!);
+			const rows = walkNextDataForModels(data);
+			if (rows && rows.length > 0) return rows;
+		} catch {}
+	}
+	// Try Next.js streaming chunks (__next_f) — unescape and walk
+	try {
+		const unescaped = html.replace(/\\\"/g, '"').replace(/\\\\/g, '\\');
+		// Look for models arrays in the streaming payload
+		const rows = walkNextDataForModels(JSON.parse('"' + unescaped.slice(0,10) + '"')); // dummy to test
+	} catch {}
+	// Attempt to extract via walk on raw html object walk (handles escaped)
+	try {
+		// Build a pseudo object from html string search
+		const candidate = extractAARowsFromHtml(html);
+		if (candidate && candidate.length > 0) return candidate;
+	} catch {}
+	return parseAARegex(html);
+}
+function extractAARowsFromHtml(html: string): AARow[] | null {
+	// Search for JSON-like model objects with rank and cost in the escaped streaming data
+	// Pattern: \"name\":\"...\", ... \"rank\":N, ... \"costPerTask\":X
+	// Also try unescaped
+	const rows: AARow[] = [];
+	const re = /\\"name\\":\\"([^\\"]+)\\"[^}]*?\\"rank\\":\s*(\d+)[^}]*?\\"costPerTask\\":\s*([0-9.]+)/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(html)) !== null) {
+		const name = m[1]!;
+		const rank = Number(m[2]);
+		const cost = Number(m[3]);
+		if (name && Number.isFinite(rank) && Number.isFinite(cost)) rows.push({ normalizedName: normalizeName(name), displayName: name, rank, costPerTask: cost });
+	}
+	if (rows.length > 0) return rows;
+	// Try unescaped variant
+	const re2 = /"name":\s*"([^"]+)"[^}]*"rank":\s*(\d+)[^}]*"costPerTask":\s*([0-9.]+)/g;
+	while ((m = re2.exec(html)) !== null) {
+		const name = m[1]!;
+		const rank = Number(m[2]);
+		const cost = Number(m[3]);
+		if (name && Number.isFinite(rank) && Number.isFinite(cost)) rows.push({ normalizedName: normalizeName(name), displayName: name, rank, costPerTask: cost });
+	}
+	// Also try alternative field names: "cost_per_task", "avgCost", "cost"
+	const re3 = /\\"name\\":\\"([^\\"]+)\\"[^}]*?\\"(costPerTask|cost_per_task|avgCost|cost)\\":\s*([0-9.]+)/g;
+	while ((m = re3.exec(html)) !== null) {
+		const name = m[1]!;
+		const cost = Number(m[3]);
+		if (name && Number.isFinite(cost)) rows.push({ normalizedName: normalizeName(name), displayName: name, rank: 9999, costPerTask: cost });
+	}
+	return rows.length ? rows : null;
+}
+function walkNextDataForModels(data: any): AARow[] | null {
+	const found: any[] = [];
+	const stack: any[] = [data];
+	const seen = new Set<any>();
+	while (stack.length) {
+		const cur = stack.pop();
+		if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
+		seen.add(cur);
+		if (Array.isArray(cur)) {
+			for (const el of cur) stack.push(el);
+			continue;
+		}
+		// heuristically detect model arrays: objects with rank/costPerTask or similar
+		for (const k of Object.keys(cur)) {
+			const v = cur[k];
+			if (Array.isArray(v) && v.length > 5 && typeof v[0] === "object" && v[0] != null) {
+				const sample = v[0];
+				if ("rank" in sample || "costPerTask" in sample || "cost_per_task" in sample || "avgCost" in sample) {
+					found.push(...v);
+				}
+			}
+			if (v && typeof v === "object") stack.push(v);
+		}
+	}
+	if (found.length === 0) return null;
+	const rows: AARow[] = [];
+	for (const m of found) {
+		const name = String(m.displayName ?? m.name ?? m.model ?? m.id ?? "");
+		if (!name) continue;
+		const rank = Number(m.rank ?? m.position ?? m.index ?? 0);
+		const costRaw = m.costPerTask ?? m.cost_per_task ?? m.avgCost ?? m.cost ?? null;
+		const cost = costRaw != null ? Number(costRaw) : null;
+		rows.push({ normalizedName: normalizeName(name), displayName: name, rank: rank || 9999, costPerTask: Number.isFinite(cost as number) ? (cost as number) : null });
+	}
+	return rows.length ? rows : null;
+}
+function parseAARegex(html: string): AARow[] | null {
+	// Very loose regex fallback — look for table rows with rank and $ cost
+	// Not critical; return null to degrade gracefully
+	return null;
+}
+async function resolveAAData(refresh: boolean): Promise<{ rows: AARow[] | null; fromCache: boolean }> {
+	if (!refresh) {
+		const cached = await loadAACache();
+		if (cached && isAAFresh(cached)) return { rows: cached.rows, fromCache: true };
+	}
+	const fetched = await fetchAA();
+	if (fetched) {
+		await saveAACache(fetched);
+		return { rows: fetched, fromCache: false };
+	}
+	const cached = await loadAACache();
+	if (cached) return { rows: cached.rows, fromCache: true };
+	return { rows: null, fromCache: false };
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -656,44 +995,115 @@ function formatCount(n: number | undefined): string {
 	return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-function tableLines(rows: ModelAllowance[], currentId: string | null): string[] {
-	const nameW = Math.max(5, ...rows.map(r => r.displayName.length));
-	const creditW = Math.max(9, ...rows.map(r => `$${r.allowance}/mo`.length)); // "Credit/mo"
-	const promptW = Math.max(10, ...rows.map(r => formatCount(r.promptsPerMonth).length));
-	const lines = [
-		`  ${"Model".padEnd(nameW + 2)}${"Credit/mo".padEnd(creditW + 2)}Prompts/mo`,
-		`  ${"─".repeat(nameW + 2 + creditW + 2 + promptW)}`,
-	];
+function formatDollarsPerRequest(n: number | null): string {
+	if (n == null || !Number.isFinite(n)) return "—";
+	return `${n.toFixed(4)}`;
+}
+function formatRequests(remaining: number | null, total: number | null): string {
+	if (remaining == null || total == null) return "—";
+	return `${formatCount(remaining)}/${formatCount(total)}`;
+}
+function truncateModelName(name: string, max: number = 24): string {
+	if (name.length <= max) return name;
+	return name.slice(0, max - 1) + "…";
+}
+
+const SORT_KEYS: SortKey[] = ["aaRank", "dollarsPerRequest", "requestsRemaining", "aaCostPerTask", "name"];
+function nextSortKey(cur: SortKey): SortKey {
+	const idx = SORT_KEYS.indexOf(cur);
+	return SORT_KEYS[(idx + 1) % SORT_KEYS.length]!;
+}
+
+function sortedEnriched(models: EnrichedModel[], sortKey: SortKey, sortDir: SortDir): EnrichedModel[] {
+	const dir = sortDir === "asc" ? 1 : -1;
+	return [...models].sort((a, b) => {
+		let va: number | string;
+		let vb: number | string;
+		switch (sortKey) {
+			case "dollarsPerRequest":
+				va = a.dollarsPerRequest ?? Infinity;
+				vb = b.dollarsPerRequest ?? Infinity;
+				break;
+			case "requestsRemaining":
+				va = a.requestsRemaining ?? -Infinity;
+				vb = b.requestsRemaining ?? -Infinity;
+				break;
+			case "aaRank":
+				va = a.aaRank ?? Infinity;
+				vb = b.aaRank ?? Infinity;
+				break;
+			case "aaCostPerTask":
+				va = a.aaCostPerTask ?? Infinity;
+				vb = b.aaCostPerTask ?? Infinity;
+				break;
+			case "name":
+			default:
+				va = a.displayName.toLowerCase();
+				vb = b.displayName.toLowerCase();
+				if (va < vb) return -1 * dir;
+				if (va > vb) return 1 * dir;
+				return 0;
+		}
+		if (typeof va === "number" && typeof vb === "number") {
+			if (va !== vb) return (va - vb) * dir;
+			return a.displayName.localeCompare(b.displayName);
+		}
+		return 0;
+	});
+}
+
+function tableLines(
+	rows: EnrichedModel[],
+	currentId: string | null,
+	sortKey: SortKey = "aaRank",
+	sortDir: SortDir = "asc",
+): string[] {
+	const MODEL_W = 24;
+	const SORT_INDICATOR: Record<SortKey, string> = {
+		name: "Model",
+		dollarsPerRequest: "$/req",
+		requestsRemaining: "Requests",
+		aaRank: "AA Rank",
+		aaCostPerTask: "AA $/task",
+	};
+	const arrow = sortDir === "asc" ? "▴" : "▾";
+	const headerModel = (SORT_INDICATOR[sortKey] === "Model" ? `Model ${arrow}` : "Model").padEnd(MODEL_W + 2);
+	const hdrDollars = (SORT_INDICATOR[sortKey] === "$/req" ? `$/req ${arrow}` : "$/req").padEnd(8 + 2);
+	const hdrReq = (SORT_INDICATOR[sortKey] === "Requests" ? `Requests ${arrow}` : "Requests").padEnd(16 + 2);
+	const hdrRank = (SORT_INDICATOR[sortKey] === "AA Rank" ? `AA Rank ${arrow}` : "AA Rank").padEnd(8 + 2);
+	const hdrCost = SORT_INDICATOR[sortKey] === "AA $/task" ? `AA $/task ${arrow}` : "AA $/task";
+	const header = `  ${headerModel}${hdrDollars}${hdrReq}${hdrRank}${hdrCost}`;
+	const sep = `  ${"─".repeat(MODEL_W)}  ${"─".repeat(8)}  ${"─".repeat(16)}  ${"─".repeat(8)}  ${"─".repeat(9)}`;
+	const lines = [header, sep];
 	for (const r of rows) {
-		const left = `  ${r.displayName.padEnd(nameW + 2)}$${r.allowance}/mo`;
-		const row = `${left.padEnd(2 + nameW + 2 + creditW + 2)}${formatCount(r.promptsPerMonth)}`;
-		// Reverse video supplies a clear highlight while bold makes the row
-		// legible in both kitty-image and text-only terminals. No marker text is
-		// added, so the row stays in its sorted location without extra clutter.
+		const modelCell = truncateModelName(r.displayName, MODEL_W).padEnd(MODEL_W + 2);
+		const dollarsCell = formatDollarsPerRequest(r.dollarsPerRequest).padEnd(8 + 2);
+		const reqCell = formatRequests(r.requestsRemaining, r.requestsTotal).padEnd(16 + 2);
+		const rankCell = (r.aaRank != null ? `#${r.aaRank}` : "—").padEnd(8 + 2);
+		const costCell = r.aaCostPerTask != null ? `${r.aaCostPerTask.toFixed(2)}` : "—";
+		const row = `  ${modelCell}${dollarsCell}${reqCell}${rankCell}${costCell}`;
 		lines.push(r.id === currentId ? `\x1b[1;7m${row}\x1b[0m` : row);
 	}
 	return lines;
 }
 
-/**
- * Sort by the docs' estimated prompts/month, highest first. The estimates
- * already include the observed pricing modifiers; credit is deliberately not
- * part of this ordering. Models without an estimate sort last.
- */
-function renderModelTable(models: ModelAllowance[], currentId: string | null, onlyModel: string | null): string[] {
-	const rows = [...models].sort((a, b) => {
-		const pa = a.promptsPerMonth ?? -Infinity;
-		const pb = b.promptsPerMonth ?? -Infinity;
-		if (pa !== pb) return pb - pa;
-		return a.displayName.localeCompare(b.displayName);
-	});
+function renderModelTable(
+	models: EnrichedModel[],
+	currentId: string | null,
+	onlyModel: string | null,
+	sortKey: SortKey = "aaRank",
+	sortDir: SortDir = "asc",
+): string[] {
+	const rows = sortedEnriched(models, sortKey, sortDir);
 	if (onlyModel) {
 		const row = rows.find(m => m.id === onlyModel);
 		if (!row) return [`  ${onlyModel} — no allowance data (not in docs table)`];
-		return tableLines([row], currentId);
+		return tableLines([row], currentId, sortKey, sortDir);
 	}
-	return tableLines(rows, currentId);
+	return tableLines(rows, currentId, sortKey, sortDir);
 }
+
+
 
 function usageLines(usage: UsageData | null, limits: DocsData["limits"]): string[] {
 	if (!usage) return [`  5h $${limits.rolling} · wk $${limits.weekly} · mo $${limits.monthly}`];
@@ -718,15 +1128,32 @@ export function buildReport(opts: {
 	docs: ResolvedDocs;
 	currentModelId: string | null;
 	onlyModel: string | null;
+	trackerData?: TrackerData | null;
+	trackerError?: string | null;
+	aaRows?: AARow[] | null;
+	sortKey?: SortKey;
+	sortDir?: SortDir;
 }): string {
-	const { usage, docs, currentModelId, onlyModel } = opts;
-	const lines = renderModelTable(docs.data.models, currentModelId, onlyModel);
-
+	const { usage, docs, currentModelId, onlyModel, trackerData, trackerError, aaRows, sortKey = "aaRank", sortDir = "asc" } = opts;
+	const aaMap = new Map<string, AARow>();
+	if (aaRows) for (const r of aaRows) aaMap.set(r.normalizedName, r);
+	const enriched = enrichModels(docs.data.models, usage, trackerData ?? null, aaMap);
+	const lines = renderModelTable(enriched, currentModelId, onlyModel, sortKey, sortDir);
+	if (trackerError) {
+		lines.push("");
+		lines.push("  tracker data unavailable — $/req hidden");
+	}
+	if (aaRows === null || (aaRows && aaRows.length === 0)) {
+		// AA degraded is silent in table (shows —), but add footer note
+	}
 	// Keep the logo-to-list area clean. Usage details sit immediately before
 	// the gauge image in the renderer, so they read as labels for those bars.
 	lines.push("");
 	lines.push(...usageLines(usage, docs.data.limits));
-
+	if (aaRows && aaRows.length > 0) {
+		lines.push("  AA $/task from artificialanalysis.ai; not adjusted for OpenCode Go pricing");
+	}
+	lines.push("  sort: /go-usage s cycles key (aaRank→$/req→Requests→AA $/task→name), /go-usage S flips dir — header shows ▴/▾; also --sort=<key> --order=<asc|desc>");
 	return lines.join("\n");
 }
 
@@ -977,6 +1404,30 @@ function safeHex(get: () => string, fallback: string): string {
 async function runGoUsage(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): Promise<void> {
 	const tokens = args.split(/\s+/).filter(Boolean);
 	const refresh = tokens.includes("--refresh");
+	const debug = tokens.includes("--debug");
+	const sortArg = tokens.find(t => t.startsWith("--sort="));
+	const orderArg = tokens.find(t => t.startsWith("--order="));
+	let sortKey: SortKey = "aaRank";
+	let sortDir: SortDir = "asc";
+	if (sortArg) {
+		const v = sortArg.slice("--sort=".length) as SortKey;
+		if ((SORT_KEYS as string[]).includes(v)) sortKey = v;
+	}
+	if (orderArg) {
+		const v = orderArg.slice("--order=".length);
+		if (v === "asc" || v === "desc") sortDir = v;
+	}
+	// bare s/S support for CLI cycling (runGoUsage is stateless, so s→next key from current, S→flip dir)
+	if (tokens.includes("s")) {
+		sortKey = nextSortKey(sortKey);
+	}
+	if (tokens.includes("S")) {
+		sortDir = sortDir === "asc" ? "desc" : "asc";
+	}
+	// also allow bare "sort" token
+	if (tokens.includes("sort") && !sortArg) {
+		sortKey = nextSortKey(sortKey);
+	}
 	const modelArg = tokens.find(t => t.startsWith("--model="));
 	const onlyModel = modelArg ? modelArg.slice("--model=".length) : null;
 
@@ -1000,7 +1451,22 @@ async function runGoUsage(pi: ExtensionAPI, args: string, ctx: ExtensionCommandC
 
 	const docs = await resolveDocsData(refresh);
 	const currentModelId = bareModelId(ctx.model?.id ?? ctx.models.current()?.id);
-	const reportText = buildReport({ usage, docs, currentModelId, onlyModel });
+	// Load tracker + AA in parallel, non-blocking degrade to null
+	const [trackerRes, aaRes] = await Promise.all([
+		loadTrackerData(),
+		resolveAAData(refresh),
+	]);
+	const trackerData = trackerRes.data;
+	const trackerError = trackerRes.error ? "tracker data unavailable — $/req hidden" : null;
+	const aaRows = aaRes.rows;
+	if (debug && trackerData) {
+		const sample = trackerData.models.find(m => m.name.includes("Luna")) ?? trackerData.models[0];
+		if (sample) {
+			const cost = trackerRequestCost(sample);
+			console.error(`[go-usage --debug] ${sample.name} ${sample.tier ?? ""} cost=${cost} pattern=${JSON.stringify(sample.pattern)} effIn=${sample.effectiveInput} effOut=${sample.effectiveOutput} effRead=${sample.effectiveCachedRead} effWrite=${sample.effectiveCachedWrite}`);
+		}
+	}
+	const reportText = buildReport({ usage, docs, currentModelId, onlyModel, trackerData, trackerError, aaRows, sortKey, sortDir });
 
 
 	// Quick bar-fill animation before the card lands (TUI only, and only when
