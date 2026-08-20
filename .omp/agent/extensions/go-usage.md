@@ -2,8 +2,7 @@
 
 > **Location:** `~/.omp/agent/extensions/go-usage.ts` (single auto-discovered file)
 > **Command:** `/go-usage [--model=<id>] [--refresh] [--debug] [--sort=<key>] [--order=<asc|desc>]`
-> **Tracker:** `/home/dautist/Github-Repos/ocgo-price-tracker/data/latest.json` (effective prices → $/req)
-> **AA cache:** `~/.omp/cache/go-usage-aa.json` (24h TTL, Artificial Analysis)
+> **AA cache:** `~/.omp/cache/go-usage-aa.json` (24h TTL, `api/v2/language/models/free` `x-api-key: $AANAL_API_KEY` `100/day`)
 > **TUI:** Ghostty/Kitty with `kitty-graphics` → logo + gauge PNGs; text fallback otherwise
 
 ## What it does
@@ -29,7 +28,7 @@ Container
 ```
 
 - **Logo** — white-on-transparent `~/Downloads/opencode.png` (1282×230, 2.3 KB, base64 `OPENCODE_LOGO_B64`) via `Image` (`imageKey: go-usage-logo`).
-- **Table** — `Model (24ch) | $/req (4dp) | Requests (remaining/total) | AA Rank | AA $/task`, sorted by `sortKey` (default `aaRank` asc; `—` sinks). Columns: `$/req` via `trackerRequestCost` (effective prices at $60 credit, `0.05*input+0.95*cachedWrite` heuristic), `Requests` = `floor(promptsPerMonth*(1-monthly.percent/100))` / `promptsPerMonth` (missing → `—`), `AA Rank`/`AA $/task` from `artificialanalysis.ai` scrape (cache `~/.omp/cache/go-usage-aa.json`, 24h TTL). Truncate model names to 24ch; current row `bold+reverse-video` in sorted position.
+- **Table** — `Model (24ch) | $/req (4dp) | Requests (remaining/total) | AA Rank | AA $/task`, sorted by `sortKey` (default `aaRank` asc; `—` sinks). Columns: `$/req` via `trackerRequestCost` (effective prices at $60 credit, `0.05*input+0.95*cachedWrite` heuristic), `Requests` = `floor(promptsPerMonth*(1-monthly.percent/100))` / `promptsPerMonth` (missing → `—`), `AA Rank` (intelligence `v4.1` sort desc) + `AA $/task` (`cost_per_task.total_cost`) from `api/v2/language/models/free` (cache `~/.omp/cache/go-usage-aa.json`, 24h TTL). Truncate model names to 24ch; current row `bold+reverse-video` in sorted position.
 - **Usage block** — immediately before the gauge image so labels read as bar annotations (e.g. `5h 10% · ≈$1.20 of $12 · resets in 4h20m`). No header title; table is first content.
 - **Gauges** — 3 pill bars (22 px, radius 11, 2 px track ring, transparent track, gradient fill `mix(accent,black,.25)→mix(accent,white,.7)`). Exported helpers: `encodePng`, `buildGaugePng`, `OPENCODE_LOGO_B64`.
 - **Text fallback** — same report, no images, plain percents.
@@ -58,7 +57,7 @@ Old caches backfilled via `withEmbeddedPrompts()`.
 
 **Tracker** — `loadTrackerData()` reads `ocgo-price-tracker/data/latest.json` via `Bun.file().json()` (non-blocking, `try/catch` → banner `tracker data unavailable — $/req hidden`). Cheapest tier per normalized name wins (e.g. Luna ≤272K vs >272K); `ALIAS` map handles mismatches (`claude-sonnet-4` etc). Unmatched → `—` for $/req, or `allowance/promptsPerMonth` estimate when tracker missing (e.g. new Muse Spark 60/226600≈$0.0003).
 
-**AA scrape** — best-effort, no API key (public leaderboard, no official API). `fetchAA()` tries `https://artificialanalysis.ai/leaderboards/models` then `/models` then legacy `text/leaderboard` URLs with `User-Agent: Mozilla/5.0`, `AbortSignal.timeout(10000)`. Primary live source is `puppeteer-core` DOM scrape of `leaderboards/models` table (`table tbody tr` → `Model | Cost per Task USD`), cached `24h`. Fallback order: `fetch` `leaderboards/models` HTML → RSC `__next_f` regex → `puppeteer` (accurate live `$0.68` for `GLM-5.3 (max)`, `Luna (max) $0.05` / `(low) $0.01` cheapest kept per `normalizeName`). No API key, no public AA API; if `chromium` missing or scrape fails, degrades to `—` (`logger.warn`). Cache `~/.omp/cache/go-usage-aa.json` (`{fetchedAt, rows}`), TTL 24h, `mkdir -p` on write, `--refresh` busts both docs and AA caches, `--debug` logs one `trackerRequestCost` sample to stderr.
+**AA scrape** — free API `https://artificialanalysis.ai/api/v2/language/models/free` (`x-api-key: $AANAL_API_KEY` from `~/dotfiles/.env:14` `aa_erSKIc…`, `process.env.AANAL_API_KEY` precedence, `chmod 600`). `fetchAANALAll()` paginates `?page=1..4` (`page_size 200`, `has_more`), maps `slug`/`name` → `normalizedName`, `evaluations.artificial_analysis_intelligence_index` (sort desc → `rank`), `artificial_analysis_intelligence_index_cost.cost_per_task.total_cost` → `costPerTask`, `pricing` passthrough, `agentic/coding` indices. `401`/`403`/`429` (`Retry-After`/`X-RateLimit-*` `100/day` free) degrade to `—` (`logger.warn`, never crash). Cache `~/.omp/cache/go-usage-aa.json` (`{fetchedAt, rows, intelligence_index_version 4.1}`) `24h` `TTL`, `mkdir -p`, de-duplicates by `normalizedName` cheapest `intelligence` kept. `ALIAS` handles `muse-spark-1.2-contributor` etc. Table shows `AA Rank` (intelligence) + `AA $/task` (cost per task).
 
 ## Verification
 
@@ -68,7 +67,7 @@ Old caches backfilled via `withEmbeddedPrompts()`.
 - `/go-usage --debug` logs Luna cost `0.0015` (list) / `0.0060` (effective)
 - `/go-usage --sort=dollarsPerRequest --order=asc` cheapest $/req top; `/go-usage s` → next key, `/go-usage S` → flip dir (header `▴/▾`); report is static so `s`/`S` are CLI args, not live TUI keys
 - Degraded: `mv data/latest.json data/latest.json.bak && /go-usage` → banner `tracker data unavailable`, other sections render
-- AA: best-effort scrape — cold run *attempts* to populate ≥5 rows (currently degrades to `—` due to RSC change); cache `~/.omp/cache/go-usage-aa.json` created when parse succeeds, second run uses cache, `--refresh` rewrites, network disabled → `—` (no API key required)
+- AA: free API `api/v2/language/models/free` (`x-api-key: $AANAL_API_KEY`, `100/day` `X-RateLimit-*`) — cold `rm cache; /go-usage` → `≥5` rows (`intelligence`/`cost_per_task`), file `~/.omp/cache/go-usage-aa.json` created, warm `stat` unchanged, `--refresh` bump, `401`/`429` → `—` (still renders), `agentic`/`coding` indices also cached
 
 ## Pricing formula
 

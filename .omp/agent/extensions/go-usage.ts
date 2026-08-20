@@ -56,14 +56,9 @@ const CUSTOM_TYPE = "go-usage";
 const TRACKER_DATA_PATH = "/home/dautist/Github-Repos/ocgo-price-tracker/data/latest.json";
 const AA_CACHE_FILE = path.join(os.homedir(), ".omp", "cache", "go-usage-aa.json");
 const AA_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-const AA_URLS = [
-	"https://artificialanalysis.ai/leaderboards/models",
-	"https://artificialanalysis.ai/models",
-	"https://artificialanalysis.ai/text/leaderboard/model-ranking",
-	"https://artificialanalysis.ai/text/leaderboard",
-];
+const AANAL_API_URL = "https://artificialanalysis.ai/api/v2/language/models/free";
+const AANAL_DOTENV_PATH = path.join(os.homedir(), "dotfiles", ".env");
 const AA_FETCH_TIMEOUT_MS = 10000;
-
 class UsageKeyRejectedError extends Error {
 	constructor() {
 		super("usage key rejected");
@@ -170,6 +165,10 @@ interface AARow {
 	rank: number;
 	costPerTask: number | null;
 	qualityIndex?: number;
+	agenticIndex?: number;
+	codingIndex?: number;
+	pricing?: { price_1m_input_tokens: number | null; price_1m_output_tokens: number | null; price_1m_cache_hit_tokens: number | null; price_1m_cache_write_tokens: number | null };
+	slug?: string;
 }
 
 interface AACache {
@@ -586,100 +585,97 @@ async function saveAACache(rows: AARow[]): Promise<void> {
 		await writeFile(AA_CACHE_FILE, JSON.stringify(payload, null, 2));
 	} catch { /* non-fatal */ }
 }
-async function fetchAA(): Promise<AARow[] | null> {
-	for (const url of AA_URLS) {
-		try {
-			const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; OMP go-usage)" }, signal: AbortSignal.timeout(AA_FETCH_TIMEOUT_MS) });
-			if (!res.ok) continue;
-			const html = await res.text();
-			const rows = parseAAHtml(html);
-			if (rows && rows.length > 0) return rows;
-			// Also try RSC variant
-			try {
-				const rscRes = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 (compatible; OMP go-usage)", "RSC": "1" }, signal: AbortSignal.timeout(AA_FETCH_TIMEOUT_MS) });
-				if (rscRes.ok) {
-					const rsc = await rscRes.text();
-					const rscRows = parseAAHtml(rsc);
-					if (rscRows && rscRows.length > 0) return rscRows;
-				}
-			} catch {}
-		} catch { continue; }
-	}
-	// Fallback: puppeteer DOM scrape (accurate live table, no API key)
+async function resolveAANALKey(): Promise<string | null> {
+	if (process.env.AANAL_API_KEY) return process.env.AANAL_API_KEY;
 	try {
-		const rows = await fetchAAViaPuppeteer();
-		if (rows && rows.length > 0) return rows;
+		const text = await Bun.file(AANAL_DOTENV_PATH).text();
+		const m = text.match(/AANAL_API_KEY="([^"]+)"/) || text.match(/AANAL_API_KEY=([^\n]+)/);
+		if (m) return m[1]!.trim().replace(/^["']|["']$/g, "");
 	} catch {}
-	// No public AA API and RSC server HTML currently has no rank/cost — degrade to — (plan: logger.warn, never crash)
 	return null;
 }
-async function fetchAAViaPuppeteer(): Promise<AARow[] | null> {
+async function fetchAANALPage(key: string, page: number): Promise<{rows: AARow[], pagination: {has_more?: boolean}} | null> {
 	try {
-		const puppeteer = await import("puppeteer-core");
-		const browser = await (puppeteer as any).launch({
-			executablePath: "/usr/bin/chromium",
-			headless: "new",
-			args: ["--no-sandbox","--disable-setuid-sandbox","--disable-gpu","--disable-dev-shm-usage"]
+		const res = await fetch(`${AANAL_API_URL}?page=${page}`, {
+			headers: { "x-api-key": key },
+			signal: AbortSignal.timeout(AA_FETCH_TIMEOUT_MS),
 		});
-		const page = await browser.newPage();
-		await page.setUserAgent("Mozilla/5.0 (compatible; OMP go-usage)");
-		await page.goto("https://artificialanalysis.ai/leaderboards/models", {waitUntil:"networkidle2", timeout:20000});
-		await new Promise(r=>setTimeout(r as any, 3000));
-		const raw = await page.evaluate(()=>{
-			const trs = Array.from(document.querySelectorAll('table tbody tr'));
-			return trs.map((tr,i)=>{
-				const cells = Array.from(tr.querySelectorAll('td')).map(td=> (td as HTMLElement).innerText.trim());
-				return {name: cells[0]||"", cost: cells[4]||"", idx:i+1};
-			});
-		});
-		await browser.close();
-		const rows: AARow[] = [];
-		const cheapest = new Map<string, AARow>();
-		for(const r of raw){
-			if(!r.name || !r.cost || r.cost==="--") continue;
-			const cost = Number(r.cost.replace(/[^0-9.]/g,""));
-			if(!Number.isFinite(cost)) continue;
-			const norm = normalizeName(r.name);
-			const existing = cheapest.get(norm);
-			// Keep cheapest cost per normalized name (e.g. Luna low $0.01 vs max $0.05 -> keep $0.01)
-			if(!existing || cost < (existing.costPerTask ?? Infinity)){
-				cheapest.set(norm, {normalizedName:norm, displayName:r.name, rank:r.idx, costPerTask:cost});
-			}
+		if (res.status === 401) throw new Error("AANAL 401 invalid key");
+		if (res.status === 403) throw new Error("AANAL 403 tier");
+		if (res.status === 429) {
+			const retry = res.headers.get("Retry-After");
+			throw new Error(`AANAL 429 ${retry ?? ""}`);
 		}
-		return Array.from(cheapest.values());
-	} catch {
-		return null;
-	}
+		if (!res.ok) return null;
+		const j = await res.json() as unknown;
+		if (!j || typeof j !== "object" || !("data" in j)) return null;
+		const data = (j as {data: unknown}).data;
+		if (!Array.isArray(data)) return null;
+		const pagination = (j as {pagination?: unknown}).pagination as {has_more?: boolean} | undefined;
+		const rows: AARow[] = [];
+		for (const item of data) {
+			if (!item || typeof item !== "object") continue;
+			const rec = item as Record<string, unknown>;
+			const name = typeof rec.name === "string" ? rec.name : typeof rec.slug === "string" ? rec.slug : "";
+			if (!name) continue;
+			const evaluations = rec.evaluations as Record<string, unknown> | undefined;
+			const intel = evaluations?.artificial_analysis_intelligence_index;
+			const agentic = evaluations?.artificial_analysis_agentic_index;
+			const coding = evaluations?.artificial_analysis_coding_index;
+			const costObj = rec.artificial_analysis_intelligence_index_cost as Record<string, unknown> | undefined;
+			const costPerTaskObj = costObj?.cost_per_task as Record<string, unknown> | undefined;
+			const cost = costPerTaskObj?.total_cost;
+			const pricing = rec.pricing as Record<string, unknown> | undefined;
+			rows.push({
+				normalizedName: normalizeName(name),
+				displayName: name,
+				rank: 0,
+				costPerTask: typeof cost === "number" ? cost : null,
+				qualityIndex: typeof intel === "number" ? intel : undefined,
+				agenticIndex: typeof agentic === "number" ? agentic : undefined,
+				codingIndex: typeof coding === "number" ? coding : undefined,
+				pricing: pricing ? {
+					price_1m_input_tokens: typeof pricing.price_1m_input_tokens === "number" ? pricing.price_1m_input_tokens : null,
+					price_1m_output_tokens: typeof pricing.price_1m_output_tokens === "number" ? pricing.price_1m_output_tokens : null,
+					price_1m_cache_hit_tokens: typeof pricing.price_1m_cache_hit_tokens === "number" ? pricing.price_1m_cache_hit_tokens : null,
+					price_1m_cache_write_tokens: typeof pricing.price_1m_cache_write_tokens === "number" ? pricing.price_1m_cache_write_tokens : null,
+				} : undefined,
+				slug: typeof rec.slug === "string" ? rec.slug : undefined,
+			});
+		}
+		rows.sort((a, b) => (b.qualityIndex ?? -Infinity) - (a.qualityIndex ?? -Infinity));
+		rows.forEach((r, i) => r.rank = i + 1);
+		return {rows, pagination: pagination ?? {has_more: false}};
+	} catch { return null; }
 }
-function parseAAHtml(html: string): AARow[] | null {
-	// Try __NEXT_DATA__ JSON
-	const nextDataMatch = html.match(/<script[^>]*id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
-	if (nextDataMatch) {
-		try {
-			const data = JSON.parse(nextDataMatch[1]!);
-			const rows = walkNextDataForModels(data);
-			if (rows && rows.length > 0) return rows;
-		} catch {}
+async function fetchAANALAll(): Promise<AARow[] | null> {
+	const key = await resolveAANALKey();
+	if (!key) return null;
+	const all: AARow[] = [];
+	for (let page = 1; page <= 10; page++) {
+		const res = await fetchAANALPage(key, page);
+		if (!res || res.rows.length === 0) break;
+		all.push(...res.rows);
+		if (!res.pagination?.has_more) break;
 	}
-	// Try Next.js streaming chunks (__next_f) — unescape and walk
-	try {
-		const unescaped = html.replace(/\\\"/g, '"').replace(/\\\\/g, '\\');
-		// Look for models arrays in the streaming payload
-		const rows = walkNextDataForModels(JSON.parse('"' + unescaped.slice(0,10) + '"')); // dummy to test
-	} catch {}
-	// Attempt to extract via walk on raw html object walk (handles escaped)
-	try {
-		// Build a pseudo object from html string search
-		const candidate = extractAARowsFromHtml(html);
-		if (candidate && candidate.length > 0) return candidate;
-	} catch {}
-	return parseAARegex(html);
+	if (all.length === 0) return null;
+	all.sort((a, b) => (b.qualityIndex ?? -Infinity) - (a.qualityIndex ?? -Infinity));
+	all.forEach((r, i) => r.rank = i + 1);
+	const byName = new Map<string, AARow>();
+	for (const r of all) if (!byName.has(r.normalizedName)) byName.set(r.normalizedName, r);
+	return Array.from(byName.values());
+}
+async function fetchAA(): Promise<AARow[] | null> {
+	const apiRows = await fetchAANALAll();
+	if (apiRows && apiRows.length > 0) return apiRows;
+	return null;
+}
+function parseAAHtml(_html: string): AARow[] | null {
+	return null;
 }
 function extractAARowsFromHtml(html: string): AARow[] | null {
-	// Search for JSON-like model objects with rank and cost in the escaped streaming data
-	// Pattern: \"name\":\"...\", ... \"rank\":N, ... \"costPerTask\":X
-	// Also try unescaped
 	const rows: AARow[] = [];
+	// Pattern: \"name\":\"...\", ... \"rank\":N, ... \"costPerTask\":X
 	const re = /\\"name\\":\\"([^\\"]+)\\"[^}]*?\\"rank\\":\s*(\d+)[^}]*?\\"costPerTask\\":\s*([0-9.]+)/g;
 	let m: RegExpExecArray | null;
 	while ((m = re.exec(html)) !== null) {
@@ -706,10 +702,10 @@ function extractAARowsFromHtml(html: string): AARow[] | null {
 	}
 	return rows.length ? rows : null;
 }
-function walkNextDataForModels(data: any): AARow[] | null {
-	const found: any[] = [];
-	const stack: any[] = [data];
-	const seen = new Set<any>();
+function walkNextDataForModels(data: unknown): AARow[] | null {
+	const found: unknown[] = [];
+	const stack: unknown[] = [data];
+	const seen = new Set<unknown>();
 	while (stack.length) {
 		const cur = stack.pop();
 		if (!cur || typeof cur !== "object" || seen.has(cur)) continue;
@@ -718,13 +714,12 @@ function walkNextDataForModels(data: any): AARow[] | null {
 			for (const el of cur) stack.push(el);
 			continue;
 		}
-		// heuristically detect model arrays: objects with rank/costPerTask or similar
-		for (const k of Object.keys(cur)) {
-			const v = cur[k];
+		for (const k of Object.keys(cur as Record<string, unknown>)) {
+			const v = (cur as Record<string, unknown>)[k];
 			if (Array.isArray(v) && v.length > 5 && typeof v[0] === "object" && v[0] != null) {
-				const sample = v[0];
+				const sample = v[0] as Record<string, unknown>;
 				if ("rank" in sample || "costPerTask" in sample || "cost_per_task" in sample || "avgCost" in sample) {
-					found.push(...v);
+					found.push(...(v as unknown[]));
 				}
 			}
 			if (v && typeof v === "object") stack.push(v);
@@ -732,13 +727,17 @@ function walkNextDataForModels(data: any): AARow[] | null {
 	}
 	if (found.length === 0) return null;
 	const rows: AARow[] = [];
-	for (const m of found) {
-		const name = String(m.displayName ?? m.name ?? m.model ?? m.id ?? "");
+	for (const item of found) {
+		if (!item || typeof item !== "object") continue;
+		const rec = item as Record<string, unknown>;
+		const nameRaw = rec.displayName ?? rec.name ?? rec.model ?? rec.id;
+		const name = typeof nameRaw === "string" ? nameRaw : "";
 		if (!name) continue;
-		const rank = Number(m.rank ?? m.position ?? m.index ?? 0);
-		const costRaw = m.costPerTask ?? m.cost_per_task ?? m.avgCost ?? m.cost ?? null;
+		const rankRaw = rec.rank ?? rec.position ?? rec.index;
+		const rank = typeof rankRaw === "number" ? rankRaw : Number(rankRaw ?? 0);
+		const costRaw = rec.costPerTask ?? rec.cost_per_task ?? rec.avgCost ?? rec.cost;
 		const cost = costRaw != null ? Number(costRaw) : null;
-		rows.push({ normalizedName: normalizeName(name), displayName: name, rank: rank || 9999, costPerTask: Number.isFinite(cost as number) ? (cost as number) : null });
+		rows.push({ normalizedName: normalizeName(name), displayName: name, rank: Number.isFinite(rank) ? rank : 9999, costPerTask: typeof cost === "number" && Number.isFinite(cost) ? cost : null });
 	}
 	return rows.length ? rows : null;
 }
@@ -1182,7 +1181,7 @@ export function buildReport(opts: {
 	lines.push("");
 	lines.push(...usageLines(usage, docs.data.limits));
 	if (aaRows && aaRows.length > 0) {
-		lines.push("  AA $/task from artificialanalysis.ai; not adjusted for OpenCode Go pricing");
+		lines.push("  AA $/task from artificialanalysis.ai/api/v2 (intelligence v4.1); not adjusted for OpenCode Go pricing");
 	}
 	lines.push("  sort: /go-usage s cycles key (aaRank→$/req→Requests→AA $/task→name), /go-usage S flips dir — header shows ▴/▾; also --sort=<key> --order=<asc|desc>");
 	return lines.join("\n");
