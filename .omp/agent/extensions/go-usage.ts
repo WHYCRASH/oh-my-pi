@@ -603,22 +603,9 @@ async function fetchAA(): Promise<AARow[] | null> {
 			} catch {}
 		} catch { continue; }
 	}
-	// Fallback: static snapshot when live scrape fails (site now RSC without server cost data). Keeps columns useful.
-	// Data from https://artificialanalysis.ai/leaderboards/models 2026-08-20: cost per task leaders
-	const fallback: AARow[] = [
-		{ normalizedName: normalizeName("GPT 5.6 Luna"), displayName: "GPT 5.6 Luna", rank: 1, costPerTask: 0.01 },
-		{ normalizedName: normalizeName("MiMo V2.5"), displayName: "MiMo V2.5", rank: 2, costPerTask: 0.01 },
-		{ normalizedName: normalizeName("Llama 4 Scout"), displayName: "Llama 4 Scout", rank: 3, costPerTask: 0.01 },
-		{ normalizedName: normalizeName("Grok 4.5"), displayName: "Grok 4.5", rank: 8, costPerTask: 0.03 },
-		{ normalizedName: normalizeName("GLM-5.3"), displayName: "GLM-5.3", rank: 12, costPerTask: 0.04 },
-		{ normalizedName: normalizeName("Kimi K2.7 Code"), displayName: "Kimi K2.7 Code", rank: 15, costPerTask: 0.05 },
-		{ normalizedName: normalizeName("MiniMax M2.7"), displayName: "MiniMax M2.7", rank: 18, costPerTask: 0.04 },
-		{ normalizedName: normalizeName("Qwen3.7 Plus"), displayName: "Qwen3.7 Plus", rank: 20, costPerTask: 0.02 },
-		{ normalizedName: normalizeName("DeepSeek V4 Flash"), displayName: "DeepSeek V4 Flash", rank: 25, costPerTask: 0.02 },
-		{ normalizedName: normalizeName("Hy3"), displayName: "Hy3", rank: 30, costPerTask: 0.015 },
-	];
-	// Only use fallback if we have no rows; still cache it so table shows something
-	return fallback;
+	// No public AA API and RSC server HTML currently has no rank/cost — degrade to — (plan: logger.warn, never crash)
+	// Keep columns useful but honest: return null so table shows — and footer notes degraded
+	return null;
 }
 function parseAAHtml(html: string): AARow[] | null {
 	// Try __NEXT_DATA__ JSON
