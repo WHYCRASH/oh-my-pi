@@ -503,6 +503,8 @@ const ALIAS: Record<string, string> = {
 	"claude-4-opus": "claude-opus-4",
 	"gpt-5.6-luna-≤-272k-tokens": "gpt-5.6-luna",
 	"gpt-5.6-luna->-272k-tokens": "gpt-5.6-luna",
+	"muse-spark-1.2-contributor": "muse-spark-1.2",
+	"muse-spark-1.2": "muse-spark-1.2-contributor",
 };
 
 function buildTrackerMap(tracker: TrackerData): Map<string, TrackerModel> {
