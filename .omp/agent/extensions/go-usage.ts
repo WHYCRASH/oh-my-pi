@@ -603,9 +603,51 @@ async function fetchAA(): Promise<AARow[] | null> {
 			} catch {}
 		} catch { continue; }
 	}
+	// Fallback: puppeteer DOM scrape (accurate live table, no API key)
+	try {
+		const rows = await fetchAAViaPuppeteer();
+		if (rows && rows.length > 0) return rows;
+	} catch {}
 	// No public AA API and RSC server HTML currently has no rank/cost — degrade to — (plan: logger.warn, never crash)
-	// Keep columns useful but honest: return null so table shows — and footer notes degraded
 	return null;
+}
+async function fetchAAViaPuppeteer(): Promise<AARow[] | null> {
+	try {
+		const puppeteer = await import("puppeteer-core");
+		const browser = await (puppeteer as any).launch({
+			executablePath: "/usr/bin/chromium",
+			headless: "new",
+			args: ["--no-sandbox","--disable-setuid-sandbox","--disable-gpu","--disable-dev-shm-usage"]
+		});
+		const page = await browser.newPage();
+		await page.setUserAgent("Mozilla/5.0 (compatible; OMP go-usage)");
+		await page.goto("https://artificialanalysis.ai/leaderboards/models", {waitUntil:"networkidle2", timeout:20000});
+		await new Promise(r=>setTimeout(r as any, 3000));
+		const raw = await page.evaluate(()=>{
+			const trs = Array.from(document.querySelectorAll('table tbody tr'));
+			return trs.map((tr,i)=>{
+				const cells = Array.from(tr.querySelectorAll('td')).map(td=> (td as HTMLElement).innerText.trim());
+				return {name: cells[0]||"", cost: cells[4]||"", idx:i+1};
+			});
+		});
+		await browser.close();
+		const rows: AARow[] = [];
+		const cheapest = new Map<string, AARow>();
+		for(const r of raw){
+			if(!r.name || !r.cost || r.cost==="--") continue;
+			const cost = Number(r.cost.replace(/[^0-9.]/g,""));
+			if(!Number.isFinite(cost)) continue;
+			const norm = normalizeName(r.name);
+			const existing = cheapest.get(norm);
+			// Keep cheapest cost per normalized name (e.g. Luna low $0.01 vs max $0.05 -> keep $0.01)
+			if(!existing || cost < (existing.costPerTask ?? Infinity)){
+				cheapest.set(norm, {normalizedName:norm, displayName:r.name, rank:r.idx, costPerTask:cost});
+			}
+		}
+		return Array.from(cheapest.values());
+	} catch {
+		return null;
+	}
 }
 function parseAAHtml(html: string): AARow[] | null {
 	// Try __NEXT_DATA__ JSON
